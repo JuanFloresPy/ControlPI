@@ -1,0 +1,161 @@
+// Pines del puente H y motor
+const int pinMotorIn1 = 8;
+const int pinMotorIn2 = 9;
+const int pinMotorPWM = 5;
+
+// Pines del encoder
+const int pinA = 2; // Canal A del encoder
+const int pinB = 3; // Canal B del encoder
+
+// Variables para el encoder
+volatile long pos = 0;          // Contador de posiciones del encoder
+int lastEncoded = 0;            // Última lectura del encoder
+
+// Variables para el control PID
+float kp = 91.0;               // Constante proporcional más alta
+float ki = 13.0;                // Constante integral más alta
+float kd = 5.0;                 // Nueva constante derivativa (para PID)
+float eprev = 0.0;              // Error previo
+float eintegral = 0.0;          // Integral acumulada del error
+unsigned long prevT = 0;        // Tiempo previo para cálculo de deltaT
+
+// Variables de control
+float ref = 0;                // Velocidad angular de referencia (rad/s)
+float velocidad_ang = 0.0;      // Velocidad angular actual (rad/s)
+float velocidad_ang_filtrada = 0.0; // Velocidad angular filtrada
+float grados_ant = 0.0;         // Ángulo anterior en radianes
+
+// Sentido de giro deseado: 1 para horario, -1 para antihorario
+int sentidoDeseado = 1;         // Cambia este valor según el sentido deseado
+
+// Parámetros para filtrado y protección contra windup
+const float alpha = 0.1;        // Factor de suavizado para el filtro (0 < alpha <= 1)
+const float eintegral_max = 1000.0; // Límite superior para eintegral
+const float eintegral_min = -1000.0; // Límite inferior para eintegral
+
+// Parámetros para detección de obstrucción
+const unsigned long timeout = 500000; // 0.5 segundos sin movimiento antes de considerar que hay obstrucción
+unsigned long lastMovementTime = 0;   // Tiempo del último movimiento detectado (AHORA DECLARADO AQUÍ)
+unsigned long obstructionTime = 0;    // Tiempo transcurrido sin movimiento
+
+// Umbral mínimo de PWM
+const float minPWM = 50.0;
+const float maxPWM = 255.0;           // PWM máximo
+
+void setup() {
+  Serial.begin(9600);
+
+  // Configuración de los pines del motor
+  pinMode(pinMotorIn1, OUTPUT);
+  pinMode(pinMotorIn2, OUTPUT);
+  pinMode(pinMotorPWM, OUTPUT);
+
+  // Configuración de los pines del encoder
+  pinMode(pinA, INPUT_PULLUP);
+  pinMode(pinB, INPUT_PULLUP);
+
+  // Interrupciones para el encoder
+  attachInterrupt(digitalPinToInterrupt(pinA), updateEncoder, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pinB), updateEncoder, CHANGE);
+
+  // Inicialización del tiempo previo
+  prevT = micros();
+
+  // Establecer la referencia de velocidad
+  ref = 2.50; // Velocidad angular deseada en rad/s
+}
+
+void loop() {
+  unsigned long currT = micros();
+  float deltaT = (currT - prevT) / 1.0e6; // Convertir deltaT a segundos
+  prevT = currT;
+
+  // Calcular el ángulo actual en radianes
+  float grados = (pos * 0.15) * (PI / 180.0); // 0.15 grados por incremento, convertido a radianes
+
+  // Calcular el cambio de ángulo
+  float delta_theta = grados - grados_ant;
+  grados_ant = grados;
+
+  // Calcular la velocidad angular actual en rad/s
+  float velocidad_ang_actual = delta_theta / deltaT;
+
+  // Filtrar la velocidad angular para reducir el ruido
+  velocidad_ang_filtrada = alpha * velocidad_ang_actual + (1 - alpha) * velocidad_ang_filtrada;
+
+  // Actualizar la velocidad angular utilizada en el control
+  velocidad_ang = velocidad_ang_filtrada;
+
+  // Calcular la velocidad deseada considerando el sentido de giro
+  float velocidad_deseada = ref * sentidoDeseado; // Velocidad deseada con sentido
+
+  // Cálculo del error
+  float error = velocidad_deseada - velocidad_ang;
+
+  // Acumular la integral del error con protección contra windup
+  eintegral += error * deltaT;
+  if (eintegral > eintegral_max) eintegral = eintegral_max;
+  if (eintegral < eintegral_min) eintegral = eintegral_min;
+
+  // Cálculo de la derivada del error
+  float der_error = (error - eprev) / deltaT;
+
+  // Señal de control PID
+  float u = kp * error + ki * eintegral + kd * der_error;
+
+  // Ajustar el PWM (potencia del motor)
+  float pwr = fabs(u);
+
+  // Limitar el valor de PWM (potencia del motor) a 255 como máximo
+  if (pwr > 255) pwr = 255;
+  if (pwr < minPWM) pwr = minPWM; // No dejar que el PWM baje de un mínimo
+
+  // Mover el motor
+  setMotor(sentidoDeseado, pwr);
+
+  // Enviar los datos al Serial Plotter
+  Serial.print("Velocidad: ");
+  Serial.print(velocidad_ang);
+  Serial.print(" ");  // Separador entre las variables
+
+  Serial.print("PWM: ");
+  Serial.print(pwr);
+  Serial.print(" ");  // Separador entre las variables
+
+  Serial.print("Ref: ");
+  Serial.println(velocidad_deseada);
+
+  delay(10); // Pequeño retraso para estabilizar el loop
+}
+
+void setMotor(int dir, float velocidad) {
+  if (velocidad > maxPWM) velocidad = maxPWM;
+  if (velocidad < 0.0) velocidad = 0.0;
+  analogWrite(pinMotorPWM, velocidad);
+
+  // Control de dirección según el valor de "sentidoDeseado"
+  if (dir == 1) {
+    digitalWrite(pinMotorIn1, HIGH);  // Gira hacia adelante
+    digitalWrite(pinMotorIn2, LOW);
+  } else if (dir == -1) {
+    digitalWrite(pinMotorIn1, LOW);   // Gira hacia atrás
+    digitalWrite(pinMotorIn2, HIGH);
+  } else {
+    digitalWrite(pinMotorIn1, LOW);   // Detener motor
+    digitalWrite(pinMotorIn2, LOW);
+  }
+}
+
+void updateEncoder() {
+  int MSB = digitalRead(pinA); // Most Significant Bit
+  int LSB = digitalRead(pinB); // Least Significant Bit
+
+  int encoded = (MSB << 1) | LSB; // Combina las lecturas de los pines A y B
+  int sum = (lastEncoded << 2) | encoded; // Estado actual y anterior
+
+  if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) pos++;
+  if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) pos--;
+
+  lastEncoded = encoded; // Actualizar la última lectura
+  lastMovementTime = micros(); // Actualizar el tiempo del último movimiento
+}
