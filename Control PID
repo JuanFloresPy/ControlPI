@@ -14,7 +14,7 @@ int lastEncoded = 0;            // Última lectura del encoder
 // Variables para el control PID
 float kp = 91.0;               // Constante proporcional más alta
 float ki = 13.0;                // Constante integral más alta
-float kd = 5.0;                 // Nueva constante derivativa (para PID)
+float kd = 3.0;                 // Nueva constante derivativa (para PID)
 float eprev = 0.0;              // Error previo
 float eintegral = 0.0;          // Integral acumulada del error
 unsigned long prevT = 0;        // Tiempo previo para cálculo de deltaT
@@ -113,20 +113,27 @@ void loop() {
   // Mover el motor
   setMotor(sentidoDeseado, pwr);
 
-  // Enviar los datos al Serial Plotter
-  Serial.print("Velocidad: ");
-  Serial.print(velocidad_ang);
-  Serial.print(" ");  // Separador entre las variables
+  // Aquí se pueden comentar los valores que no quieres mostrar (Y para graficar un valor se tiene que comentar todo tipo de texto, únicamente se deja el valor en el serial monitor y se abre el serial plotter)
+  // *Enviar datos al Serial Plotter*
+  // Habilita o comenta las líneas según las variables que desees graficar:
 
-  Serial.print("PWM: ");
-  Serial.print(pwr);
-  Serial.print(" ");  // Separador entre las variables
+  // Velocidad angular actual
+  //Serial.print("Velocidad Angular: ");
+  Serial.print(velocidad_ang);  // En rad/s
+  
+  // PWM aplicado al motor
+  //Serial.print("\tPWM: ");
+  //Serial.print(pwr);
 
-  Serial.print("Ref: ");
-  Serial.println(velocidad_deseada);
+  // Velocidad angular de referencia
+  //Serial.print("\tReferencia: ");
+  //Serial.print(velocidad_deseada);
+
+  Serial.println(); // Nueva línea para el Serial Plotter
 
   delay(10); // Pequeño retraso para estabilizar el loop
 }
+
 
 void setMotor(int dir, float velocidad) {
   if (velocidad > maxPWM) velocidad = maxPWM;
@@ -159,3 +166,4 @@ void updateEncoder() {
   lastEncoded = encoded; // Actualizar la última lectura
   lastMovementTime = micros(); // Actualizar el tiempo del último movimiento
 }
+
