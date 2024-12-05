@@ -1,0 +1,182 @@
+// Pines del puente H y motor
+const int pinMotorIn1 = 8; // IN1 del puente H
+const int pinMotorIn2 = 9; // IN2 del puente H
+const int pinMotorPWM = 5; // Pin PWM para controlar la velocidad
+
+// Pines del encoder
+const int pinA = 2; // Canal A del encoder
+const int pinB = 3; // Canal B del encoder
+
+// Variables para el encoder
+float encoderCount = 0; // Contador de pulsos del encoder
+int lastEncoded = 0;            // Última lectura codificada
+unsigned long lastEncoderTime = 0; // Último tiempo en que se recibió un pulso del encoder
+const unsigned long encoderTimeout = 200; // Tiempo máximo sin pulsos antes de considerar velocidad cero (ms)
+
+// Variables de tiempo
+unsigned long previousMillis = 0;
+const unsigned long interval = 50;    // Intervalo para calcular la velocidad (ms)
+
+// Constantes del encoder y dimensiones
+const float pulsesPerRevolution = 2400.0; // Pulsos por revolución (600 PPR x 4)
+const float gearRatio = 1.1; // Relación de transmisión (ajustar si es necesario)
+
+// Variables para el control PI
+float kp = 60.0;                // Constante proporcional
+float ki = 0.5;                 // Constante integral
+float eintegral = 0.0;          // Acumulado del error integral
+
+// Variables de control
+float ref = 2.0;               // Velocidad angular de referencia (rad/s)
+float velocidad_ang = 0.0;      // Velocidad angular actual (rad/s)
+
+// Protección contra windup
+const float eintegral_max = 500.0; // Límite superior del error integral
+const float eintegral_min = -500.0; // Límite inferior del error integral
+
+// Umbrales de PWM
+const float minPWM = 121.0;     // Valor mínimo operativo del PWM
+const float maxPWM = 255.0;     // Valor máximo del PWM
+
+// Constantes para la relación PWM-Velocidad
+const float m = 0.020746;       // Pendiente (rad/s por unidad de PWM)
+const float b = -1.909986;      // Intersección (rad/s)
+
+void setup() {
+  Serial.begin(9600);
+
+  // Configuración de pines del motor
+  pinMode(pinMotorIn1, OUTPUT);
+  pinMode(pinMotorIn2, OUTPUT);
+  pinMode(pinMotorPWM, OUTPUT);
+
+  // Configuración de pines del encoder
+  pinMode(pinA, INPUT_PULLUP);
+  pinMode(pinB, INPUT_PULLUP);
+
+  // Interrupciones del encoder
+  attachInterrupt(digitalPinToInterrupt(pinA), updateEncoder, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pinB), updateEncoder, CHANGE);
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    unsigned long deltaT = currentMillis - previousMillis;
+    previousMillis = currentMillis;
+
+    // Leer el contador del encoder de forma segura
+    noInterrupts();
+    long count = encoderCount;
+    encoderCount = 0; // Reiniciar el contador
+    interrupts();
+
+    // Verificar si se han recibido pulsos recientemente
+    if (currentMillis - lastEncoderTime < encoderTimeout) {
+      // Calcular RPM del motor
+      float rpmMotor = ((float)count / pulsesPerRevolution) * (60000.0 / deltaT);
+
+      // Ajustar según la relación de transmisión
+      float rpmAttachedWheel = rpmMotor / gearRatio;
+
+      // Calcular velocidad angular en rad/s
+      velocidad_ang = rpmAttachedWheel * (2.0 * PI / 60.0);
+    } else {
+      velocidad_ang = 0.0;
+    }
+
+    // Calcular el error
+    float error = ref - velocidad_ang;
+
+    // Acumular el error integral con protección contra windup
+    eintegral += error * (deltaT / 1000.0); // deltaT en segundos
+    if (eintegral > eintegral_max) eintegral = eintegral_max;
+    if (eintegral < eintegral_min) eintegral = eintegral_min;
+
+    // Señal de control PI
+    float u = kp * error + ki * eintegral;
+
+    // Calcular el PWM base necesario para la velocidad deseada
+    float PWM_feedforward = 0.0;
+    if (ref > 0.0) {
+      PWM_feedforward = (ref - b) / m;
+      if (PWM_feedforward < minPWM) PWM_feedforward = minPWM;
+    } else if (ref < 0.0) {
+      PWM_feedforward = (ref - b) / m;
+      if (PWM_feedforward > -minPWM) PWM_feedforward = -minPWM;
+    } else {
+      PWM_feedforward = 0.0;
+    }
+
+    // PWM total a aplicar
+    float pwr = PWM_feedforward + u;
+
+    // Limitar pwr al rango permitido, considerando la zona muerta
+    if (pwr > maxPWM) pwr = maxPWM;
+    else if (pwr < -maxPWM) pwr = -maxPWM;
+    else if (pwr > -minPWM && pwr < minPWM) pwr = 0.0; // Dentro de la zona muerta, detener el motor
+
+    // Mover el motor
+    setMotor(pwr);
+
+    // Monitoreo serial
+    Serial.print("Ref:"); Serial.print(ref); Serial.print(" ");
+    // Serial.print(" rad/s, ");
+    Serial.print("Velocidad:"); Serial.print(velocidad_ang); Serial.print(" ");
+    //Serial.print(" rad/s, ");
+    Serial.print("Error:"); Serial.print(error); Serial.print(" ");
+    Serial.print("PWM:"); Serial.println(pwr); Serial.print(" ");
+  }
+}
+
+// Función para controlar el motor
+void setMotor(float pwmValue) {
+  // Determinar la dirección
+  int dir = (pwmValue >= 0) ? 1 : -1;
+
+  // Obtener el valor absoluto del PWM
+  float velocidad = fabs(pwmValue);
+
+  // Limitar el PWM al máximo permitido
+  if (velocidad > maxPWM) velocidad = maxPWM;
+
+  // Detener el motor si el PWM es cero
+  if (velocidad == 0.0) {
+    analogWrite(pinMotorPWM, 0);
+    digitalWrite(pinMotorIn1, LOW);
+    digitalWrite(pinMotorIn2, LOW);
+    return;
+  }
+
+  // Aplicar el PWM y establecer la dirección
+  analogWrite(pinMotorPWM, velocidad);
+
+  if (dir == 1) {
+    digitalWrite(pinMotorIn1, HIGH);
+    digitalWrite(pinMotorIn2, LOW);
+  } else {
+    digitalWrite(pinMotorIn1, LOW);
+    digitalWrite(pinMotorIn2, HIGH);
+  }
+}
+
+// Interrupción del encoder
+void updateEncoder() {
+  int stateA = digitalRead(pinA);
+  int stateB = digitalRead(pinB);
+
+  int encoded = (stateA << 1) | stateB;
+  int sum = (lastEncoded << 2) | encoded;
+
+  // Determinar la dirección según la transición de estados
+  if (sum == 0b0001 || sum == 0b0111 || sum == 0b1110 || sum == 0b1000) {
+    encoderCount++;
+  } else if (sum == 0b0010 || sum == 0b0100 || sum == 0b1101 || sum == 0b1011) {
+    encoderCount--;
+  }
+  lastEncoded = encoded;
+
+  // Actualizar el tiempo del último pulso del encoder
+  lastEncoderTime = millis();
+}
